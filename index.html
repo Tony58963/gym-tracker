@@ -357,7 +357,19 @@ function removeEx(wid){
   document.getElementById('wcount').textContent=workout.length;saveAll();renderWorkout();
 }
 function toggleActive(wid){workout.forEach(e=>{if(e.wid===wid)e.active=!e.active});saveAll();renderWorkout();}
-function addSet(wid){workout.find(e=>e.wid===wid).sets.push({weight:'',reps:'',rir:'',done:false});saveAll();renderWorkout();}
+function addSet(wid){
+  const ex=workout.find(e=>e.wid===wid);
+  const s0=ex.sets[0];
+  const cardio=isCardio(ex);
+  let newSet={done:false};
+  if(cardio){
+    newSet.level=s0.level||''; newSet.speed=s0.speed||''; newSet.mins=s0.mins||'';
+  } else {
+    newSet.weight=s0.weight||''; newSet.reps=s0.reps||''; newSet.rir=s0.rir||'';
+  }
+  ex.sets.push(newSet);
+  saveAll();renderWorkout();
+}
 function removeSet(wid){const ex=workout.find(e=>e.wid===wid);if(ex.sets.length>1){ex.sets.pop();saveAll();renderWorkout();}}
 function toggleSetDone(wid,si){
   const ex=workout.find(e=>e.wid===wid);
