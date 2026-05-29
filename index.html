@@ -155,6 +155,14 @@
   .confirm-yes{background:var(--accent);color:#0f0f0f;border-color:transparent;font-weight:700}
 
   .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px;vertical-align:middle}
+  .backup-bar{padding:12px;border-top:0.5px solid var(--border);display:flex;gap:8px;flex-wrap:wrap}
+  .backup-bar button{flex:1;min-width:120px;font-size:13px;padding:10px}
+  .backup-restore-btn{background:var(--accent-dim);color:var(--accent);border-color:var(--accent-border)}
+  .backup-save-btn{background:rgba(96,184,240,0.12);color:#60b8f0;border-color:rgba(96,184,240,0.3)}
+  #restore-input{display:none}
+  .restore-msg{font-size:12px;padding:8px 12px;border-radius:var(--radius-sm);margin:0 12px 10px;text-align:center}
+  .restore-msg.ok{background:rgba(96,240,140,0.12);color:#60f08c;border:0.5px solid rgba(96,240,140,0.3)}
+  .restore-msg.err{background:var(--red-dim);color:var(--red);border:0.5px solid rgba(255,95,95,0.25)}
   ::-webkit-scrollbar{width:3px}
   ::-webkit-scrollbar-track{background:transparent}
   ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px}
@@ -215,6 +223,12 @@
       <div id="hist-list"></div>
       <div class="hist-empty" id="hist-empty" style="display:none">
         <p>No sessions saved yet.<br>Finish a workout to save it here.</p>
+      </div>
+      <div id="restore-msg-area"></div>
+      <div class="backup-bar">
+        <button class="backup-save-btn" onclick="saveBackup()">💾 Save backup</button>
+        <button class="backup-restore-btn" onclick="document.getElementById('restore-input').click()">📂 Restore backup</button>
+        <input type="file" id="restore-input" accept=".json" onchange="loadBackup(event)" />
       </div>
     </div>
   </div>
@@ -617,6 +631,66 @@ function showExportSession(id){
 function closeExport(e){
   if(!e||e.target===document.getElementById('export-modal')||e.type==='click')
     document.getElementById('export-modal').classList.remove('show');
+}
+
+/* ── BACKUP & RESTORE ── */
+function saveBackup(){
+  const data={
+    version:1,
+    exportedAt:new Date().toISOString(),
+    library:library,
+    workout:workout,
+    history:history,
+    sessionStart:sessionStart
+  };
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download='gym-tracker-backup-'+new Date().toISOString().slice(0,10)+'.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showRestoreMsg('Backup saved successfully ✓','ok');
+}
+
+function loadBackup(event){
+  const file=event.target.files[0];
+  if(!file)return;
+  const reader=new FileReader();
+  reader.onload=function(e){
+    try{
+      const data=JSON.parse(e.target.result);
+      if(!data.version||!data.library){
+        showRestoreMsg('Invalid backup file — not a Gym Tracker backup','err');
+        return;
+      }
+      if(!confirm('This will replace your current library, workout and history with the backup. Are you sure?'))return;
+      library=data.library||[];
+      workout=data.workout||[];
+      history=data.history||[];
+      sessionStart=data.sessionStart||Date.now();
+      saveAll();
+      updateHeader();
+      renderLib();
+      renderWorkout();
+      renderHistory();
+      document.getElementById('wcount').textContent=workout.length;
+      document.getElementById('hcount').textContent=history.length;
+      showRestoreMsg('Backup restored successfully ✓','ok');
+    }catch(err){
+      showRestoreMsg('Could not read backup file — it may be corrupted','err');
+    }
+  };
+  reader.readAsText(file);
+  event.target.value='';
+}
+
+function showRestoreMsg(msg,type){
+  const area=document.getElementById('restore-msg-area');
+  area.innerHTML=`<div class="restore-msg ${type}">${msg}</div>`;
+  setTimeout(()=>area.innerHTML='',4000);
 }
 
 /* ── TABS ── */
