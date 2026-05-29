@@ -366,6 +366,8 @@ function startRest(wid) {
   }, 1000);
 }
 
+function isCardio(ex) { return ex.muscle === 'Cardio'; }
+
 function renderWorkout() {
   const list = document.getElementById('ex-list');
   const empty = document.getElementById('workout-empty');
@@ -375,24 +377,45 @@ function renderWorkout() {
   bar.classList.add('show');
 
   list.innerHTML = workout.map((ex,idx) => {
+    const cardio = isCardio(ex);
     const done = ex.sets.filter(s=>s.done).length;
     const restSecs = restTimers[ex.wid]?.secs;
-    const restHtml = restSecs != null ? `<div class="rest-badge">⏱ Rest <span class="rest-val" id="rv-${ex.wid}">${restSecs > 0 ? restSecs+'s' : 'Go!'}</span></div>` : '';
-    const rows = ex.sets.map((s,si) => `
-      <div class="set-row">
-        <span class="set-idx">${si+1}</span>
-        <input type="number" inputmode="decimal" min="0" placeholder="kg" value="${s.weight}" onchange="updateField('${ex.wid}',${si},'weight',this.value)" />
-        <input type="number" inputmode="numeric" min="0" placeholder="reps" value="${s.reps}" onchange="updateField('${ex.wid}',${si},'reps',this.value)" />
-        <input type="number" inputmode="numeric" min="0" placeholder="RIR" value="${s.rir}" onchange="updateField('${ex.wid}',${si},'rir',this.value)" />
-        <button class="set-done-btn ${s.done?'checked':''}" onclick="toggleSetDone('${ex.wid}',${si})">${s.done?'✓':'○'}</button>
-      </div>`).join('');
+    const restHtml = (!cardio && restSecs != null) ? `<div class="rest-badge">⏱ Rest <span class="rest-val" id="rv-${ex.wid}">${restSecs > 0 ? restSecs+'s' : 'Go!'}</span></div>` : '';
+    const label = cardio ? 'session' : 'set';
+    const subtitleCount = cardio
+      ? `${done}/${ex.sets.length} ${done===1?'session':'sessions'}`
+      : `${done}/${ex.sets.length} sets`;
+
+    let headHtml, rows;
+    if (cardio) {
+      headHtml = `<div class="sets-head" style="grid-template-columns:28px 1fr 1fr 1fr 36px"><span>#</span><span>Level</span><span>Speed</span><span>Mins</span><span></span></div>`;
+      rows = ex.sets.map((s,si) => `
+        <div class="set-row" style="grid-template-columns:28px 1fr 1fr 1fr 36px">
+          <span class="set-idx">${si+1}</span>
+          <input type="number" inputmode="decimal" min="0" placeholder="Level" value="${s.level||''}" onchange="updateField('${ex.wid}',${si},'level',this.value)" />
+          <input type="number" inputmode="decimal" min="0" placeholder="km/h" value="${s.speed||''}" onchange="updateField('${ex.wid}',${si},'speed',this.value)" />
+          <input type="number" inputmode="decimal" min="0" placeholder="mins" value="${s.mins||''}" onchange="updateField('${ex.wid}',${si},'mins',this.value)" />
+          <button class="set-done-btn ${s.done?'checked':''}" onclick="toggleSetDone('${ex.wid}',${si})">${s.done?'✓':'○'}</button>
+        </div>`).join('');
+    } else {
+      headHtml = `<div class="sets-head" style="grid-template-columns:28px 1fr 1fr 1fr 36px"><span>#</span><span>kg</span><span>Reps</span><span>RIR</span><span></span></div>`;
+      rows = ex.sets.map((s,si) => `
+        <div class="set-row" style="grid-template-columns:28px 1fr 1fr 1fr 36px">
+          <span class="set-idx">${si+1}</span>
+          <input type="number" inputmode="decimal" min="0" placeholder="kg" value="${s.weight||''}" onchange="updateField('${ex.wid}',${si},'weight',this.value)" />
+          <input type="number" inputmode="numeric" min="0" placeholder="reps" value="${s.reps||''}" onchange="updateField('${ex.wid}',${si},'reps',this.value)" />
+          <input type="number" inputmode="numeric" min="0" placeholder="RIR" value="${s.rir||''}" onchange="updateField('${ex.wid}',${si},'rir',this.value)" />
+          <button class="set-done-btn ${s.done?'checked':''}" onclick="toggleSetDone('${ex.wid}',${si})">${s.done?'✓':'○'}</button>
+        </div>`).join('');
+    }
+
     return `
     <div class="ex-card ${ex.active?'active-ex':''} ${ex.completed?'done-ex':''}">
       <div class="ex-header" onclick="toggleActive('${ex.wid}')">
         <div class="ex-badge">${ex.completed ? '✓' : idx+1}</div>
         <div class="ex-header-info">
           <div class="ex-title">${ex.name}</div>
-          <div class="ex-subtitle"><span style="color:${muscleColor(ex.muscle)}">${ex.muscle}</span> · ${done}/${ex.sets.length} sets</div>
+          <div class="ex-subtitle"><span style="color:${muscleColor(ex.muscle)}">${ex.muscle}</span> · ${subtitleCount}</div>
         </div>
         <div class="ex-move-btns" onclick="event.stopPropagation()">
           <button onclick="moveUp('${ex.wid}')" ${idx===0?'disabled':''} style="font-size:18px;padding:0;width:32px;height:32px">↑</button>
@@ -401,11 +424,11 @@ function renderWorkout() {
         </div>
       </div>
       <div class="ex-body">
-        <div class="sets-head"><span>#</span><span>kg</span><span>Reps</span><span>RIR</span><span></span></div>
+        ${headHtml}
         ${rows}
         <div class="set-actions">
-          <button onclick="addSet('${ex.wid}')">+ Set</button>
-          <button onclick="removeSet('${ex.wid}')">− Set</button>
+          <button onclick="addSet('${ex.wid}')">+ ${cardio?'Session':'Set'}</button>
+          <button onclick="removeSet('${ex.wid}')">− ${cardio?'Session':'Set'}</button>
           ${restHtml}
         </div>
         <textarea class="ex-note" placeholder="Notes — pin setting, form cues..." onchange="updateNote('${ex.wid}',this.value)">${ex.note}</textarea>
@@ -426,19 +449,29 @@ function showExport(type) {
     let out = `WORKOUT LOG\n${date}\n${'─'.repeat(36)}\n`;
     workout.forEach((ex,i) => {
       out += `\n${i+1}. ${ex.name} (${ex.muscle})\n`;
+      const cardio = isCardio(ex);
       ex.sets.forEach((s,si) => {
-        out += `   Set ${si+1}: ${s.weight||'—'}kg × ${s.reps||'—'} reps${s.rir?' RIR '+s.rir:''} ${s.done?'✓':''}\n`;
+        if (cardio) {
+          out += `   Session ${si+1}: Level ${s.level||'—'} · ${s.speed||'—'} km/h · ${s.mins||'—'} mins ${s.done?'✓':''}\n`;
+        } else {
+          out += `   Set ${si+1}: ${s.weight||'—'}kg × ${s.reps||'—'} reps${s.rir?' RIR '+s.rir:''} ${s.done?'✓':''}\n`;
+        }
       });
       if (ex.note) out += `   Note: ${ex.note}\n`;
     });
     content.textContent = out;
   } else {
     title.textContent = 'Samsung Health CSV';
-    let csv = 'Date,Exercise,Muscle group,Set number,Weight (kg),Reps,RIR,Completed\n';
+    let csv = 'Date,Exercise,Muscle group,Session,Weight (kg),Reps,RIR,Level,Speed (km/h),Duration (mins),Completed\n';
     const d = new Date().toISOString().slice(0,10);
     workout.forEach(ex => {
+      const cardio = isCardio(ex);
       ex.sets.forEach((s,si) => {
-        csv += `${d},"${ex.name}","${ex.muscle}",${si+1},${s.weight||''},${s.reps||''},${s.rir||''},${s.done?'Yes':'No'}\n`;
+        if (cardio) {
+          csv += `${d},"${ex.name}","${ex.muscle}",${si+1},,,,${s.level||''},${s.speed||''},${s.mins||''},${s.done?'Yes':'No'}\n`;
+        } else {
+          csv += `${d},"${ex.name}","${ex.muscle}",${si+1},${s.weight||''},${s.reps||''},${s.rir||''},,,, ${s.done?'Yes':'No'}\n`;
+        }
       });
     });
     content.textContent = csv;
