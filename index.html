@@ -76,6 +76,8 @@
   .session-bar-meta{font-size:12px;color:var(--text2)}
   .finish-btn{background:var(--accent);color:#0f0f0f;border-color:transparent;font-weight:700;font-size:13px;padding:8px 16px;white-space:nowrap;flex-shrink:0}
   .finish-btn:active{background:#b0d840}
+  .start-btn{background:rgba(96,184,240,0.15);color:#60b8f0;border-color:rgba(96,184,240,0.35);font-weight:700;font-size:13px;padding:8px 16px;white-space:nowrap;flex-shrink:0}
+  .finish-btn:active{background:#b0d840}
   .workout-empty{text-align:center;padding:3rem 1.5rem;color:var(--text2)}
   .workout-empty-icon{font-size:40px;margin-bottom:12px;opacity:0.3}
   .workout-empty p{font-size:14px;line-height:1.6}
@@ -102,8 +104,11 @@
   .set-done-btn.checked{background:rgba(96,240,140,0.15);color:#60f08c;border-color:rgba(96,240,140,0.3)}
   .set-actions{display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap}
   .set-actions button{font-size:12px;padding:6px 12px}
-  .rest-badge{margin-left:auto;display:flex;align-items:center;gap:5px;background:var(--surface3);border:0.5px solid var(--border2);border-radius:20px;padding:5px 12px;font-size:13px;color:var(--text2)}
+  .rest-badge{margin-left:auto;display:flex;align-items:center;gap:6px;background:var(--surface3);border:0.5px solid var(--border2);border-radius:20px;padding:4px 10px 4px 12px;font-size:13px;color:var(--text2)}
   .rest-val{font-family:var(--mono);font-size:14px;font-weight:500;color:var(--text);min-width:34px}
+  .rest-input{font-family:var(--mono);font-size:14px;font-weight:500;color:var(--accent);background:transparent;border:none;border-bottom:1px solid var(--accent-border);width:38px;text-align:center;padding:0;outline:none}
+  .rest-pause-btn{width:26px;height:26px;padding:0;font-size:13px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .rest-paused{color:var(--accent);border-color:var(--accent-border);background:var(--accent-dim)}
   .ex-note{width:100%;margin-top:10px;height:44px;resize:none;background:var(--surface2);font-size:13px}
 
   /* HISTORY */
@@ -275,25 +280,29 @@ const DEFAULT = [
 function load(key,def){try{const v=localStorage.getItem(key);return v?JSON.parse(v):def}catch(e){return def}}
 function save(key,val){try{localStorage.setItem(key,JSON.stringify(val))}catch(e){}}
 
-let library  = load('gtlib',null) || DEFAULT.map((e,i)=>({...e,id:'d'+i,custom:false}));
-let workout  = load('gtworkout',[]);
-let history  = load('gthistory',[]);
-let sessionStart = load('gtsession', Date.now());
-let restTimers = {};
-let activeFilter = 'All';
-let currentTab = 'library';
+let library     = load('gtlib',null) || DEFAULT.map((e,i)=>({...e,id:'d'+i,custom:false}));
+let workout     = load('gtworkout',[]);
+let history     = load('gthistory',[]);
+let sessionStart= load('gtsession', null);   // null = not yet started
+let sessionActive = load('gtsessionactive', false); // true once user taps Start
+let sessionElapsed= load('gtsessionelapsed', 0);    // ms accumulated (for pause)
+let restTimers  = {};
+let restDurations= load('gtrestdurations',{});       // per-exercise custom rest duration
+let sessionTimerIv = null;
+let activeFilter= 'All';
+let currentTab  = 'library';
 
-// If saved session is from a different calendar day, auto-archive it
+// Day rollover: if saved session is from a different calendar day, auto-archive
 (function checkDayRollover(){
-  if (!workout.length) return;
+  if (!workout.length || !sessionStart) return;
   const saved = new Date(sessionStart);
   const now   = new Date();
   if (saved.toDateString() !== now.toDateString()) {
-    archiveSession(false); // silent archive — don't clear, just save snapshot
+    archiveSession(false);
   }
 })();
 
-function saveAll(){save('gtlib',library);save('gtworkout',workout);save('gthistory',history);save('gtsession',sessionStart)}
+function saveAll(){save('gtlib',library);save('gtworkout',workout);save('gthistory',history);save('gtsession',sessionStart);save('gtsessionactive',sessionActive);save('gtsessionelapsed',sessionElapsed);save('gtrestdurations',restDurations);}
 
 function fmtDate(ts){
   return new Date(ts).toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
@@ -302,20 +311,54 @@ function fmtTime(ts){
   return new Date(ts).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
 }
 function fmtDuration(ms){
+  if(!ms||ms<60000)return '< 1m';
   const m=Math.floor(ms/60000),h=Math.floor(m/60);
   return h>0?`${h}h ${m%60}m`:`${m}m`;
 }
 
-// Update header date + timer
-function updateHeader(){
-  document.getElementById('session-date').textContent = fmtDate(sessionStart);
-  const el = document.getElementById('session-timer');
-  const s = Math.floor((Date.now()-sessionStart)/1000);
-  const m = Math.floor(s/60), h = Math.floor(m/60);
-  el.textContent = h>0?`${h}h ${m%60}m`:m>0?`${m}m`:'';
+// Session timer — only counts active time (paused during rest if paused)
+let _sessionTickStart = sessionActive ? Date.now() : null;
+
+function startSessionTimer(){
+  if(sessionTimerIv) clearInterval(sessionTimerIv);
+  _sessionTickStart = Date.now();
+  sessionTimerIv = setInterval(()=>{
+    sessionElapsed += (Date.now() - _sessionTickStart);
+    _sessionTickStart = Date.now();
+    save('gtsessionelapsed', sessionElapsed);
+    updateHeader();
+  }, 10000);
 }
-setInterval(updateHeader, 15000);
+
+function updateHeader(){
+  const dateEl = document.getElementById('session-date');
+  const timerEl = document.getElementById('session-timer');
+  if(!sessionStart || !sessionActive){
+    dateEl.textContent = new Date().toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
+    timerEl.textContent = '';
+    return;
+  }
+  dateEl.textContent = fmtDate(sessionStart);
+  // Live elapsed = saved elapsed + time since last tick start
+  const live = sessionElapsed + (_sessionTickStart ? Date.now()-_sessionTickStart : 0);
+  timerEl.textContent = fmtDuration(live);
+}
+
+// Resume timer if session was already active
+if(sessionActive) startSessionTimer();
 updateHeader();
+
+function startSession(){
+  if(sessionActive) return;
+  sessionStart    = Date.now();
+  sessionActive   = true;
+  sessionElapsed  = 0;
+  _sessionTickStart = Date.now();
+  saveAll();
+  startSessionTimer();
+  updateHeader();
+  renderWorkout();
+}
 
 function isCardio(ex){return ex.muscle==='Cardio'}
 function muscleColor(m){
@@ -408,15 +451,43 @@ function updateField(wid,si,field,val){
 }
 function updateNote(wid,val){workout.find(e=>e.wid===wid).note=val;saveAll();}
 
+function getRestDuration(wid){
+  return restDurations[wid]||90;
+}
+function setRestDuration(wid,secs){
+  restDurations[wid]=secs;
+  save('gtrestdurations',restDurations);
+}
 function startRest(wid){
   if(restTimers[wid])clearInterval(restTimers[wid].iv);
-  restTimers[wid]={secs:90};
+  const dur=getRestDuration(wid);
+  restTimers[wid]={secs:dur,paused:false};
   restTimers[wid].iv=setInterval(()=>{
+    if(restTimers[wid].paused)return;
     restTimers[wid].secs--;
-    const el=document.getElementById('rv-'+wid);
-    if(el)el.textContent=restTimers[wid].secs>0?restTimers[wid].secs+'s':'Go!';
+    updateRestDisplay(wid);
     if(restTimers[wid].secs<=0)clearInterval(restTimers[wid].iv);
   },1000);
+  updateRestDisplay(wid);
+}
+function updateRestDisplay(wid){
+  const t=restTimers[wid];if(!t)return;
+  const el=document.getElementById('rv-'+wid);
+  if(el)el.textContent=t.secs>0?t.secs+'s':'Go!';
+  const pb=document.getElementById('rpause-'+wid);
+  if(pb)pb.textContent=t.paused?'▶':'⏸';
+  if(pb)pb.classList.toggle('rest-paused',t.paused);
+}
+function toggleRestPause(wid){
+  if(!restTimers[wid])return;
+  restTimers[wid].paused=!restTimers[wid].paused;
+  updateRestDisplay(wid);
+}
+function updateRestDuration(wid,val){
+  const n=parseInt(val);
+  if(isNaN(n)||n<5)return;
+  setRestDuration(wid,n);
+  if(restTimers[wid]){restTimers[wid].secs=n;updateRestDisplay(wid);}
 }
 
 function renderWorkout(){
@@ -428,20 +499,29 @@ function renderWorkout(){
   bar.classList.add('show');
 
   const doneCount=workout.filter(e=>e.completed).length;
-  const sessionBar=`
+  const liveElapsed = sessionElapsed + (_sessionTickStart ? Date.now()-_sessionTickStart : 0);
+  const sessionBar = sessionActive ? `
     <div class="session-bar">
       <div>
         <div class="session-bar-date">${fmtDate(sessionStart)}</div>
-        <div class="session-bar-meta">${doneCount}/${workout.length} exercises complete · ${fmtDuration(Date.now()-sessionStart)}</div>
+        <div class="session-bar-meta">${doneCount}/${workout.length} exercises complete · ${fmtDuration(liveElapsed)}</div>
       </div>
       <button class="finish-btn" onclick="openConfirm()">Finish ✓</button>
+    </div>` : `
+    <div class="session-bar">
+      <div>
+        <div class="session-bar-date">${new Date().toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',year:'numeric'})}</div>
+        <div class="session-bar-meta">Tap Start when you're ready</div>
+      </div>
+      <button class="start-btn" onclick="startSession()">▶ Start</button>
     </div>`;
 
   const cards=workout.map((ex,idx)=>{
     const cardio=isCardio(ex);
     const done=ex.sets.filter(s=>s.done).length;
     const restSecs=restTimers[ex.wid]?.secs;
-    const restHtml=(!cardio&&restSecs!=null)?`<div class="rest-badge">⏱ Rest <span class="rest-val" id="rv-${ex.wid}">${restSecs>0?restSecs+'s':'Go!'}</span></div>`:'';
+    const dur=getRestDuration(ex.wid);
+    const restHtml=(!cardio&&restSecs!=null)?`<div class="rest-badge">⏱ <input class="rest-input" type="number" id="rd-${ex.wid}" value="${dur}" min="5" max="600" onchange="updateRestDuration('${ex.wid}',this.value)" title="Edit rest duration (secs)" /><span class="rest-val" id="rv-${ex.wid}">${restSecs>0?restSecs+'s':'Go!'}</span><button class="rest-pause-btn" id="rpause-${ex.wid}" onclick="toggleRestPause('${ex.wid}')">${restTimers[ex.wid]?.paused?'▶':'⏸'}</button></div>`:''
     const subtitleCount=cardio?`${done}/${ex.sets.length} ${done===1?'session':'sessions'}`:`${done}/${ex.sets.length} sets`;
     let headHtml,rows;
     if(cardio){
@@ -502,20 +582,22 @@ function archiveSession(clearAfter=true){
   if(!workout.length)return;
   const record={
     id:'s'+Date.now(),
-    date:sessionStart,
-    duration:Date.now()-sessionStart,
+    date:sessionStart||Date.now(),
+    duration:sessionElapsed,
     exercises:JSON.parse(JSON.stringify(workout))
   };
-  history.unshift(record); // newest first
-  if(history.length>120)history=history.slice(0,120); // keep up to 120 sessions
+  history.unshift(record);
+  if(history.length>120)history=history.slice(0,120);
   if(clearAfter){
     workout=[];
-    sessionStart=Date.now();
-    save('gtsession',sessionStart);
+    sessionStart=null;
+    sessionActive=false;
+    sessionElapsed=0;
+    _sessionTickStart=null;
+    if(sessionTimerIv){clearInterval(sessionTimerIv);sessionTimerIv=null;}
     document.getElementById('wcount').textContent=0;
   }
-  save('gthistory',history);
-  save('gtworkout',workout);
+  saveAll();
   document.getElementById('hcount').textContent=history.length;
 }
 
