@@ -110,6 +110,15 @@
   .rest-pause-btn{width:26px;height:26px;padding:0;font-size:13px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
   .rest-paused{color:var(--accent);border-color:var(--accent-border);background:var(--accent-dim)}
   .ex-note{width:100%;margin-top:10px;height:44px;resize:none;background:var(--surface2);font-size:13px}
+  .set-row-wrap{margin-bottom:6px}
+  .set-row{display:grid;gap:6px;align-items:center}
+  .set-meta{display:flex;align-items:center;justify-content:space-between;padding:2px 0 4px 34px;gap:8px}
+  .set-timer-val{font-family:var(--mono);font-size:11px;color:var(--text3)}
+  .set-timer-val.running{color:var(--accent)}
+  .set-timer-val.done-time{color:#60f08c}
+
+  .ex-total-time{font-size:12px;color:var(--text2);margin-top:4px;font-family:var(--mono)}
+  .next-btn{background:rgba(96,184,240,0.15);color:#60b8f0;border-color:rgba(96,184,240,0.35);font-weight:700;font-size:13px;padding:6px 16px;white-space:nowrap}
 
   /* HISTORY */
   #panel-history{padding:12px 12px 20px}
@@ -255,7 +264,7 @@
 <div class="confirm-modal" id="confirm-modal">
   <div class="confirm-sheet">
     <h3>Finish session?</h3>
-    <p>This will save your workout to History and clear the current session ready for next time.</p>
+    <p>This will save your workout to History. Your exercises and weights will be kept ready for next time — only the completed ticks and timers will reset.</p>
     <div class="confirm-actions">
       <button onclick="closeConfirm()">Cancel</button>
       <button class="confirm-yes" onclick="finishSession()">Save & finish</button>
@@ -287,6 +296,7 @@ let sessionStart= load('gtsession', null);   // null = not yet started
 let sessionActive = load('gtsessionactive', false); // true once user taps Start
 let sessionElapsed= load('gtsessionelapsed', 0);    // ms accumulated (for pause)
 let restTimers  = {};
+let setTimers   = {};  // key: wid+'_'+si  val: {secs, iv, running}
 let restDurations= load('gtrestdurations',{});       // per-exercise custom rest duration
 let sessionTimerIv = null;
 let activeFilter= 'All';
@@ -346,6 +356,32 @@ function updateHeader(){
 
 // Resume timer if session was already active
 if(sessionActive) startSessionTimer();
+// Live-update set timers every second without full re-render
+setInterval(()=>{
+  Object.keys(setTimers).forEach(key=>{
+    const t=setTimers[key];
+    if(!t||!t.running)return;
+    const el=document.getElementById('stimer-'+key);
+    if(el){el.textContent=fmtSecs(t.secs);el.className='set-timer-val running';}
+    // Also update exercise total
+    const parts=key.split('_');
+    const wid=parts.slice(0,-1).join('_');
+    const ex=workout.find(e=>e.wid===wid);
+    if(ex){const tel=document.getElementById('etotal-'+wid);if(tel&&getTotalSetTime(ex)>0)tel.textContent='Active: '+fmtSecs(getTotalSetTime(ex));}
+  });
+  // Update session active total in bar
+  let _tot=0;
+  workout.forEach(ex=>{
+    if(!isCardio(ex))ex.sets.forEach((s,si)=>{
+      const k=setTimerKey(ex.wid,si);
+      _tot+=(setTimers[k]?setTimers[k].secs:(s.setDuration||0));
+    });
+  });
+  if(_tot>0){const sm=document.querySelector('.session-bar-meta');if(sm){const base=sm.textContent.replace(/· Active:.*/,'').trim();sm.textContent=base+' · Active: '+fmtSecs(_tot);}}
+  // dummy close to match original
+  Object.keys(setTimers).forEach(key=>{
+  });
+},1000);
 updateHeader();
 
 function startSession(){
@@ -432,7 +468,11 @@ function toggleSetDone(wid,si){
   const ex=workout.find(e=>e.wid===wid);
   ex.sets[si].done=!ex.sets[si].done;
   ex.completed=ex.sets.every(s=>s.done);
-  if(ex.sets[si].done&&!isCardio(ex))startRest(wid);
+  if(ex.sets[si].done){
+    stopSetTimer(wid,si);
+    ex.sets[si].setDuration=setTimers[setTimerKey(wid,si)]?.secs||0;
+    if(!isCardio(ex))startRest(wid);
+  }
   saveAll();renderWorkout();
 }
 function updateField(wid,si,field,val){
@@ -466,7 +506,12 @@ function startRest(wid){
     if(restTimers[wid].paused)return;
     restTimers[wid].secs--;
     updateRestDisplay(wid);
-    if(restTimers[wid].secs<=0)clearInterval(restTimers[wid].iv);
+    if(restTimers[wid].secs<=0){
+      clearInterval(restTimers[wid].iv);
+      // Auto-start timer on next undone set
+      const _ex=workout.find(e=>e.wid===wid);
+      if(_ex){const _ni=_ex.sets.findIndex(s=>!s.done);if(_ni!==-1)startSetTimer(wid,_ni);}
+    }
   },1000);
   updateRestDisplay(wid);
 }
@@ -490,6 +535,96 @@ function updateRestDuration(wid,val){
   if(restTimers[wid]){restTimers[wid].secs=n;updateRestDisplay(wid);}
 }
 
+function setTimerKey(wid,si){return wid+'_'+si;}
+
+function startSetTimer(wid,si){
+  const key=setTimerKey(wid,si);
+  // Stop any other running set timer for this exercise
+  const ex=workout.find(e=>e.wid===wid);
+  ex.sets.forEach((_,i)=>{
+    const k=setTimerKey(wid,i);
+    if(k!==key&&setTimers[k]&&setTimers[k].running){
+      setTimers[k].running=false;
+      clearInterval(setTimers[k].iv);
+    }
+  });
+  // Also cancel rest timer for this exercise
+  if(restTimers[wid]){clearInterval(restTimers[wid].iv);delete restTimers[wid];}
+  // Init or resume
+  if(!setTimers[key])setTimers[key]={secs:0,running:false};
+  setTimers[key].running=true;
+  clearInterval(setTimers[key].iv);
+  // Mark set as started in data
+  ex.sets[si].setStarted=true;
+  setTimers[key].iv=setInterval(()=>{
+    if(!setTimers[key]||!setTimers[key].running)return;
+    setTimers[key].secs++;
+    updateSetTimerDisplay(wid,si);
+  },1000);
+  updateSetTimerDisplay(wid,si);
+}
+
+function stopSetTimer(wid,si){
+  const key=setTimerKey(wid,si);
+  if(!setTimers[key])return;
+  setTimers[key].running=false;
+  clearInterval(setTimers[key].iv);
+  // Save duration to set data
+  const ex=workout.find(e=>e.wid===wid);
+  if(ex)ex.sets[si].setDuration=setTimers[key].secs;
+  saveAll();
+}
+
+function fmtSecs(s){
+  if(!s)return '';
+  const m=Math.floor(s/60),sec=s%60;
+  return m>0?`${m}m ${sec}s`:`${sec}s`;
+}
+
+function updateSetTimerDisplay(wid,si){
+  const key=setTimerKey(wid,si);
+  const el=document.getElementById('stimer-'+key);
+  if(!el)return;
+  const t=setTimers[key];
+  if(!t)return;
+  el.textContent=fmtSecs(t.secs);
+  el.className='set-timer-val'+(t.running?' running':t.secs>0?' done-time':'');
+}
+
+function getTotalSetTime(ex){
+  // Sum all completed set durations
+  let total=0;
+  ex.sets.forEach((s,si)=>{
+    const key=setTimerKey(ex.wid,si);
+    const dur=setTimers[key]?setTimers[key].secs:(s.setDuration||0);
+    if(s.done)total+=dur;
+  });
+  return total;
+}
+
+function nextSet(wid){
+  const ex=workout.find(e=>e.wid===wid);
+  if(!ex)return;
+  // Find first undone set
+  const nextIdx=ex.sets.findIndex(s=>!s.done);
+  if(nextIdx===-1){
+    // All sets done — mark exercise complete, cancel rest
+    if(restTimers[wid]){clearInterval(restTimers[wid].iv);delete restTimers[wid];}
+    ex.completed=true;
+    // Auto-expand next exercise
+    const exIdx=workout.indexOf(ex);
+    if(exIdx<workout.length-1){
+      workout[exIdx+1].active=true;
+    }
+    saveAll();renderWorkout();return;
+  }
+  // Cancel rest timer
+  if(restTimers[wid]){clearInterval(restTimers[wid].iv);delete restTimers[wid];}
+  // Start set timer for the next undone set
+  startSetTimer(wid,nextIdx);
+  saveAll();renderWorkout();
+}
+
 function renderWorkout(){
   const list=document.getElementById('ex-list');
   const empty=document.getElementById('workout-empty');
@@ -500,11 +635,20 @@ function renderWorkout(){
 
   const doneCount=workout.filter(e=>e.completed).length;
   const liveElapsed = sessionElapsed + (_sessionTickStart ? Date.now()-_sessionTickStart : 0);
+  // Total active lifting time across all exercises
+  let totalActive=0;
+  workout.forEach(ex=>{
+    if(!isCardio(ex))ex.sets.forEach((s,si)=>{
+      const k=setTimerKey(ex.wid,si);
+      totalActive+=(setTimers[k]?setTimers[k].secs:(s.setDuration||0));
+    });
+  });
+  const activeStr=totalActive>0?` · Active: ${fmtSecs(totalActive)}`:'';
   const sessionBar = sessionActive ? `
     <div class="session-bar">
       <div>
         <div class="session-bar-date">${fmtDate(sessionStart)}</div>
-        <div class="session-bar-meta">${doneCount}/${workout.length} exercises complete · ${fmtDuration(liveElapsed)}</div>
+        <div class="session-bar-meta">${doneCount}/${workout.length} exercises complete · ${fmtDuration(liveElapsed)}${activeStr}</div>
       </div>
       <button class="finish-btn" onclick="openConfirm()">Finish ✓</button>
     </div>` : `
@@ -527,23 +671,36 @@ function renderWorkout(){
     if(cardio){
       headHtml=`<div class="sets-head" style="grid-template-columns:28px 1fr 1fr 1fr 36px"><span>#</span><span>Level</span><span>Speed</span><span>Mins</span><span></span></div>`;
       rows=ex.sets.map((s,si)=>`
-        <div class="set-row" style="grid-template-columns:28px 1fr 1fr 1fr 36px">
-          <span class="set-idx">${si+1}</span>
-          <input type="number" inputmode="decimal" min="0" placeholder="Level" value="${s.level||''}" data-wid="${ex.wid}" data-si="${si}" data-field="level" onchange="updateField('${ex.wid}',${si},'level',this.value)" />
-          <input type="number" inputmode="decimal" min="0" placeholder="km/h" value="${s.speed||''}" data-wid="${ex.wid}" data-si="${si}" data-field="speed" onchange="updateField('${ex.wid}',${si},'speed',this.value)" />
-          <input type="number" inputmode="decimal" min="0" placeholder="mins" value="${s.mins||''}" data-wid="${ex.wid}" data-si="${si}" data-field="mins" onchange="updateField('${ex.wid}',${si},'mins',this.value)" />
-          <button class="set-done-btn ${s.done?'checked':''}" onclick="toggleSetDone('${ex.wid}',${si})">${s.done?'✓':'○'}</button>
+        <div class="set-row-wrap">
+          <div class="set-row" style="grid-template-columns:28px 1fr 1fr 1fr 36px">
+            <span class="set-idx">${si+1}</span>
+            <input type="number" inputmode="decimal" min="0" placeholder="Level" value="${s.level||''}" data-wid="${ex.wid}" data-si="${si}" data-field="level" onchange="updateField('${ex.wid}',${si},'level',this.value)" />
+            <input type="number" inputmode="decimal" min="0" placeholder="km/h" value="${s.speed||''}" data-wid="${ex.wid}" data-si="${si}" data-field="speed" onchange="updateField('${ex.wid}',${si},'speed',this.value)" />
+            <input type="number" inputmode="decimal" min="0" placeholder="mins" value="${s.mins||''}" data-wid="${ex.wid}" data-si="${si}" data-field="mins" onchange="updateField('${ex.wid}',${si},'mins',this.value)" />
+            <button class="set-done-btn ${s.done?'checked':''}" onclick="toggleSetDone('${ex.wid}',${si})">${s.done?'✓':'○'}</button>
+          </div>
         </div>`).join('');
     }else{
       headHtml=`<div class="sets-head" style="grid-template-columns:28px 1fr 1fr 1fr 36px"><span>#</span><span>kg</span><span>Reps</span><span>RIR</span><span></span></div>`;
-      rows=ex.sets.map((s,si)=>`
-        <div class="set-row" style="grid-template-columns:28px 1fr 1fr 1fr 36px">
-          <span class="set-idx">${si+1}</span>
-          <input type="number" inputmode="decimal" min="0" placeholder="kg" value="${s.weight||''}" data-wid="${ex.wid}" data-si="${si}" data-field="weight" onchange="updateField('${ex.wid}',${si},'weight',this.value)" />
-          <input type="number" inputmode="numeric" min="0" placeholder="reps" value="${s.reps||''}" data-wid="${ex.wid}" data-si="${si}" data-field="reps" onchange="updateField('${ex.wid}',${si},'reps',this.value)" />
-          <input type="number" inputmode="numeric" min="0" placeholder="RIR" value="${s.rir||''}" data-wid="${ex.wid}" data-si="${si}" data-field="rir" onchange="updateField('${ex.wid}',${si},'rir',this.value)" />
-          <button class="set-done-btn ${s.done?'checked':''}" onclick="toggleSetDone('${ex.wid}',${si})">${s.done?'✓':'○'}</button>
-        </div>`).join('');
+      rows=ex.sets.map((s,si)=>{
+        const stKey=setTimerKey(ex.wid,si);
+        const stObj=setTimers[stKey];
+        const stSecs=stObj?stObj.secs:(s.setDuration||0);
+        const isRunning=stObj&&stObj.running;
+        const timerCls='set-timer-val'+(isRunning?' running':stSecs>0?' done-time':'');
+        const timerTxt=fmtSecs(stSecs);
+        return `
+        <div class="set-row-wrap">
+          <div class="set-row" style="grid-template-columns:28px 1fr 1fr 1fr 36px">
+            <span class="set-idx">${si+1}</span>
+            <input type="number" inputmode="decimal" min="0" placeholder="kg" value="${s.weight||''}" data-wid="${ex.wid}" data-si="${si}" data-field="weight" onchange="updateField('${ex.wid}',${si},'weight',this.value)" />
+            <input type="number" inputmode="numeric" min="0" placeholder="reps" value="${s.reps||''}" data-wid="${ex.wid}" data-si="${si}" data-field="reps" onchange="updateField('${ex.wid}',${si},'reps',this.value)" />
+            <input type="number" inputmode="numeric" min="0" placeholder="RIR" value="${s.rir||''}" data-wid="${ex.wid}" data-si="${si}" data-field="rir" onchange="updateField('${ex.wid}',${si},'rir',this.value)" />
+            <button class="set-done-btn ${s.done?'checked':''}" onclick="toggleSetDone('${ex.wid}',${si})">${s.done?'✓':'○'}</button>
+          </div>
+          <div class="set-meta"><span class="${timerCls}" id="stimer-${stKey}">${timerTxt}</span></div>
+        </div>`;
+      }).join('');
     }
     return `
     <div class="ex-card ${ex.active?'active-ex':''} ${ex.completed?'done-ex':''}">
@@ -564,8 +721,10 @@ function renderWorkout(){
         <div class="set-actions">
           <button onclick="addSet('${ex.wid}')">+ ${cardio?'Session':'Set'}</button>
           <button onclick="removeSet('${ex.wid}')">− ${cardio?'Session':'Set'}</button>
+          ${!cardio?`<button class="next-btn" onclick="nextSet('${ex.wid}')">Next ▶</button>`:''}
           ${restHtml}
         </div>
+        ${!cardio?`<div class="ex-total-time" id="etotal-${ex.wid}">${getTotalSetTime(ex)>0?'Active: '+fmtSecs(getTotalSetTime(ex)):''}</div>`:''}
         <textarea class="ex-note" placeholder="Notes — pin setting, form cues..." onchange="updateNote('${ex.wid}',this.value)">${ex.note}</textarea>
       </div>
     </div>`;
@@ -589,13 +748,20 @@ function archiveSession(clearAfter=true){
   history.unshift(record);
   if(history.length>120)history=history.slice(0,120);
   if(clearAfter){
-    workout=[];
+    // Reset session state but KEEP exercises — just clear done/timer state
+    workout.forEach(ex=>{
+      ex.completed=false;
+      ex.sets.forEach(s=>{s.done=false;s.setDuration=0;s.setStarted=false;});
+    });
     sessionStart=null;
     sessionActive=false;
     sessionElapsed=0;
     _sessionTickStart=null;
     if(sessionTimerIv){clearInterval(sessionTimerIv);sessionTimerIv=null;}
-    document.getElementById('wcount').textContent=0;
+    // Clear set timers
+    Object.keys(setTimers).forEach(k=>{clearInterval(setTimers[k].iv);delete setTimers[k];});
+    // Clear rest timers
+    Object.keys(restTimers).forEach(k=>{clearInterval(restTimers[k].iv);delete restTimers[k];});
   }
   saveAll();
   document.getElementById('hcount').textContent=history.length;
@@ -627,7 +793,8 @@ function renderHistory(){
         if(cardio){
           cols=`<span>Lvl ${set.level||'—'}</span><span>${set.speed||'—'} km/h</span><span>${set.mins||'—'} min</span>`;
         }else{
-          cols=`<span>${set.weight||'—'}kg</span><span>${set.reps||'—'} reps</span><span>${set.rir?'RIR '+set.rir:''}</span>`;
+          const dur=set.setDuration?fmtSecs(set.setDuration):'';
+        cols=`<span>${set.weight||'—'}kg</span><span>${set.reps||'—'} reps</span><span>${dur}</span>`;
         }
         return `<div class="hist-set-row"><span>${i+1}</span>${cols}<span class="${set.done?'hist-set-done':''}">${set.done?'✓':''}</span></div>`;
       }).join('');
@@ -635,7 +802,7 @@ function renderHistory(){
       return `<div class="hist-ex">
         <div class="hist-ex-name"><span class="dot" style="background:${muscleColor(ex.muscle)}"></span>${ex.name} <span class="hist-ex-muscle">${ex.muscle}</span></div>
         <div class="sets-head" style="grid-template-columns:24px 1fr 1fr 1fr 1fr;font-size:10px;margin-bottom:4px">
-          <span>#</span>${cardio?'<span>Level</span><span>Speed</span><span>Mins</span>':'<span>kg</span><span>Reps</span><span>RIR</span>'}<span></span>
+          <span>#</span>${cardio?'<span>Level</span><span>Speed</span><span>Mins</span>':'<span>kg</span><span>Reps</span><span>Time</span>'}<span></span>
         </div>
         ${setRows}${noteHtml}
       </div>`;
