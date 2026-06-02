@@ -110,6 +110,12 @@
   .rest-pause-btn{width:26px;height:26px;padding:0;font-size:13px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
   .rest-paused{color:var(--accent);border-color:var(--accent-border);background:var(--accent-dim)}
   .ex-note{width:100%;margin-top:10px;height:44px;resize:none;background:var(--surface2);font-size:13px}
+  .cardio-timer-bar{display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap}
+  .cardio-timer-display{font-family:var(--mono);font-size:22px;font-weight:500;color:var(--accent);min-width:80px}
+  .cardio-timer-display.inactive{color:var(--text3)}
+  .cardio-add-btn{font-size:12px;padding:5px 10px;background:var(--accent-dim);color:var(--accent);border-color:var(--accent-border)}
+  .cardio-start-btn{font-size:13px;padding:7px 16px;font-weight:600;background:var(--accent);color:#0f0f0f;border-color:transparent}
+  .cardio-start-btn.running{background:var(--red-dim);color:var(--red);border-color:rgba(255,95,95,0.25)}
   .set-row-wrap{margin-bottom:6px}
   .set-row{display:grid;gap:6px;align-items:center}
   .set-meta{display:flex;align-items:center;justify-content:space-between;padding:2px 0 4px 34px;gap:8px}
@@ -295,8 +301,9 @@ let history     = load('gthistory',[]);
 let sessionStart= load('gtsession', null);   // null = not yet started
 let sessionActive = load('gtsessionactive', false); // true once user taps Start
 let sessionElapsed= load('gtsessionelapsed', 0);    // ms accumulated (for pause)
-let restTimers  = {};
-let setTimers   = {};  // key: wid+'_'+si  val: {secs, iv, running}
+let restTimers   = {};
+let setTimers    = {};  // key: wid+'_'+si  val: {secs, iv, running}
+let cardioTimers = {};  // key: wid  val: {secs, running, iv}
 let restDurations= load('gtrestdurations',{});       // per-exercise custom rest duration
 let sessionTimerIv = null;
 let activeFilter= 'All';
@@ -469,9 +476,18 @@ function toggleSetDone(wid,si){
   ex.sets[si].done=!ex.sets[si].done;
   ex.completed=ex.sets.every(s=>s.done);
   if(ex.sets[si].done){
-    stopSetTimer(wid,si);
-    ex.sets[si].setDuration=setTimers[setTimerKey(wid,si)]?.secs||0;
-    if(!isCardio(ex))startRest(wid);
+    if(isCardio(ex)){
+      // Stop cardio timer, save duration
+      const ct=cardioTimers[wid];
+      if(ct&&ct.running){ct.running=false;clearInterval(ct.iv);}
+      ex.sets[si].setDuration=ct?ct.secs:0;
+      // Reset cardio timer for next session on this exercise
+      if(cardioTimers[wid])delete cardioTimers[wid];
+    } else {
+      stopSetTimer(wid,si);
+      ex.sets[si].setDuration=setTimers[setTimerKey(wid,si)]?.secs||0;
+      startRest(wid);
+    }
   }
   saveAll();renderWorkout();
 }
@@ -625,6 +641,63 @@ function nextSet(wid){
   saveAll();renderWorkout();
 }
 
+/* ── CARDIO TIMERS ── */
+function startCardioTimer(wid){
+  if(!cardioTimers[wid])cardioTimers[wid]={secs:0,running:false};
+  const t=cardioTimers[wid];
+  if(t.running){
+    // Pause
+    t.running=false;
+    clearInterval(t.iv);
+    // Save duration to first undone set
+    const ex=workout.find(e=>e.wid===wid);
+    if(ex){const si=ex.sets.findIndex(s=>!s.done);if(si!==-1)ex.sets[si].setDuration=t.secs;}
+    saveAll();
+  } else {
+    // Start/resume
+    t.running=true;
+    clearInterval(t.iv);
+    t.iv=setInterval(()=>{
+      t.secs++;
+      updateCardioDisplay(wid);
+      // Keep saving duration to current set
+      const ex=workout.find(e=>e.wid===wid);
+      if(ex){const si=ex.sets.findIndex(s=>!s.done);if(si!==-1)ex.sets[si].setDuration=t.secs;}
+    },1000);
+  }
+  updateCardioDisplay(wid);
+  renderWorkout();
+}
+
+function addCardioTime(wid,secs){
+  if(!cardioTimers[wid])cardioTimers[wid]={secs:0,running:false};
+  cardioTimers[wid].secs+=secs;
+  // Update set duration
+  const ex=workout.find(e=>e.wid===wid);
+  if(ex){const si=ex.sets.findIndex(s=>!s.done);if(si!==-1)ex.sets[si].setDuration=cardioTimers[wid].secs;}
+  updateCardioDisplay(wid);
+  saveAll();
+}
+
+function updateCardioDisplay(wid){
+  const t=cardioTimers[wid];
+  const el=document.getElementById('ctimer-'+wid);
+  if(el){
+    el.textContent=t?fmtSecs(t.secs):'0s';
+    el.className='cardio-timer-display'+(t&&t.secs>0?'':' inactive');
+  }
+  const btn=document.getElementById('cstart-'+wid);
+  if(btn){
+    btn.textContent=t&&t.running?'⏸ Pause':'▶ Start';
+    btn.className='cardio-start-btn'+(t&&t.running?' running':'');
+  }
+}
+
+function getCardioTotalTime(ex){
+  // Sum setDuration across all sets (cardio stores time per session/set)
+  return ex.sets.reduce((a,s)=>a+(s.setDuration||0),0);
+}
+
 function renderWorkout(){
   const list=document.getElementById('ex-list');
   const empty=document.getElementById('workout-empty');
@@ -635,13 +708,17 @@ function renderWorkout(){
 
   const doneCount=workout.filter(e=>e.completed).length;
   const liveElapsed = sessionElapsed + (_sessionTickStart ? Date.now()-_sessionTickStart : 0);
-  // Total active lifting time across all exercises
+  // Total active time across all exercises (lifting + cardio)
   let totalActive=0;
   workout.forEach(ex=>{
-    if(!isCardio(ex))ex.sets.forEach((s,si)=>{
-      const k=setTimerKey(ex.wid,si);
-      totalActive+=(setTimers[k]?setTimers[k].secs:(s.setDuration||0));
-    });
+    if(isCardio(ex)){
+      totalActive+=getCardioTotalTime(ex);
+    } else {
+      ex.sets.forEach((s,si)=>{
+        const k=setTimerKey(ex.wid,si);
+        totalActive+=(setTimers[k]?setTimers[k].secs:(s.setDuration||0));
+      });
+    }
   });
   const activeStr=totalActive>0?` · Active: ${fmtSecs(totalActive)}`:'';
   const sessionBar = sessionActive ? `
@@ -669,17 +746,27 @@ function renderWorkout(){
     const subtitleCount=cardio?`${done}/${ex.sets.length} ${done===1?'session':'sessions'}`:`${done}/${ex.sets.length} sets`;
     let headHtml,rows;
     if(cardio){
-      headHtml=`<div class="sets-head" style="grid-template-columns:28px 1fr 1fr 1fr 36px"><span>#</span><span>Level</span><span>Speed</span><span>Mins</span><span></span></div>`;
+      const ct=cardioTimers[ex.wid];
+      const ctSecs=ct?ct.secs:0;
+      const ctRunning=ct&&ct.running;
+      headHtml=`<div class="sets-head" style="grid-template-columns:28px 1fr 1fr 36px"><span>#</span><span>Level</span><span>Speed</span><span></span></div>`;
       rows=ex.sets.map((s,si)=>`
         <div class="set-row-wrap">
-          <div class="set-row" style="grid-template-columns:28px 1fr 1fr 1fr 36px">
+          <div class="set-row" style="grid-template-columns:28px 1fr 1fr 36px">
             <span class="set-idx">${si+1}</span>
             <input type="number" inputmode="decimal" min="0" placeholder="Level" value="${s.level||''}" data-wid="${ex.wid}" data-si="${si}" data-field="level" onchange="updateField('${ex.wid}',${si},'level',this.value)" />
             <input type="number" inputmode="decimal" min="0" placeholder="km/h" value="${s.speed||''}" data-wid="${ex.wid}" data-si="${si}" data-field="speed" onchange="updateField('${ex.wid}',${si},'speed',this.value)" />
-            <input type="number" inputmode="decimal" min="0" placeholder="mins" value="${s.mins||''}" data-wid="${ex.wid}" data-si="${si}" data-field="mins" onchange="updateField('${ex.wid}',${si},'mins',this.value)" />
             <button class="set-done-btn ${s.done?'checked':''}" onclick="toggleSetDone('${ex.wid}',${si})">${s.done?'✓':'○'}</button>
           </div>
         </div>`).join('');
+      // Prepend cardio timer bar (shown once, above sets)
+      const cardioBar=`<div class="cardio-timer-bar">
+        <button id="cstart-${ex.wid}" class="cardio-start-btn${ctRunning?' running':''}" onclick="startCardioTimer('${ex.wid}')">${ctRunning?'⏸ Pause':'▶ Start'}</button>
+        <span id="ctimer-${ex.wid}" class="cardio-timer-display${ctSecs>0?'':' inactive'}">${ctSecs>0?fmtSecs(ctSecs):'0s'}</span>
+        <button class="cardio-add-btn" onclick="addCardioTime('${ex.wid}',60)">+1m</button>
+        <button class="cardio-add-btn" onclick="addCardioTime('${ex.wid}',300)">+5m</button>
+      </div>`;
+      headHtml = cardioBar + headHtml;
     }else{
       headHtml=`<div class="sets-head" style="grid-template-columns:28px 1fr 1fr 1fr 36px"><span>#</span><span>kg</span><span>Reps</span><span>RIR</span><span></span></div>`;
       rows=ex.sets.map((s,si)=>{
@@ -724,7 +811,11 @@ function renderWorkout(){
           ${!cardio?`<button class="next-btn" onclick="nextSet('${ex.wid}')">Next ▶</button>`:''}
           ${restHtml}
         </div>
-        ${!cardio?`<div class="ex-total-time" id="etotal-${ex.wid}">${getTotalSetTime(ex)>0?'Active: '+fmtSecs(getTotalSetTime(ex)):''}</div>`:''}
+        <div class="ex-total-time" id="etotal-${ex.wid}">${
+          cardio
+            ? (getCardioTotalTime(ex)>0 ? 'Cardio time: '+fmtSecs(getCardioTotalTime(ex)) : '')
+            : (getTotalSetTime(ex)>0 ? 'Active: '+fmtSecs(getTotalSetTime(ex)) : '')
+        }</div>
         <textarea class="ex-note" placeholder="Notes — pin setting, form cues..." onchange="updateNote('${ex.wid}',this.value)">${ex.note}</textarea>
       </div>
     </div>`;
@@ -762,6 +853,8 @@ function archiveSession(clearAfter=true){
     Object.keys(setTimers).forEach(k=>{clearInterval(setTimers[k].iv);delete setTimers[k];});
     // Clear rest timers
     Object.keys(restTimers).forEach(k=>{clearInterval(restTimers[k].iv);delete restTimers[k];});
+    // Clear cardio timers
+    Object.keys(cardioTimers).forEach(k=>{clearInterval(cardioTimers[k].iv);delete cardioTimers[k];});
   }
   saveAll();
   document.getElementById('hcount').textContent=history.length;
@@ -791,7 +884,8 @@ function renderHistory(){
       const setRows=ex.sets.map((set,i)=>{
         let cols;
         if(cardio){
-          cols=`<span>Lvl ${set.level||'—'}</span><span>${set.speed||'—'} km/h</span><span>${set.mins||'—'} min</span>`;
+          const cdur=set.setDuration?fmtSecs(set.setDuration):(set.mins?set.mins+'min':'—');
+          cols=`<span>Lvl ${set.level||'—'}</span><span>${set.speed||'—'} km/h</span><span>${cdur}</span>`;
         }else{
           const dur=set.setDuration?fmtSecs(set.setDuration):'';
         cols=`<span>${set.weight||'—'}kg</span><span>${set.reps||'—'} reps</span><span>${dur}</span>`;
@@ -802,7 +896,7 @@ function renderHistory(){
       return `<div class="hist-ex">
         <div class="hist-ex-name"><span class="dot" style="background:${muscleColor(ex.muscle)}"></span>${ex.name} <span class="hist-ex-muscle">${ex.muscle}</span></div>
         <div class="sets-head" style="grid-template-columns:24px 1fr 1fr 1fr 1fr;font-size:10px;margin-bottom:4px">
-          <span>#</span>${cardio?'<span>Level</span><span>Speed</span><span>Mins</span>':'<span>kg</span><span>Reps</span><span>Time</span>'}<span></span>
+          <span>#</span>${cardio?'<span>Level</span><span>Speed</span><span>Time</span>':'<span>kg</span><span>Reps</span><span>Time</span>'}<span></span>
         </div>
         ${setRows}${noteHtml}
       </div>`;
@@ -812,7 +906,13 @@ function renderHistory(){
       <div class="hist-session-header" onclick="toggleHistSession('${s.id}')">
         <div>
           <div class="hist-session-date">${fmtDate(s.date)}</div>
-          <div class="hist-session-meta">${fmtTime(s.date)} · ${fmtDuration(s.duration)} · ${exCount} exercises · ${setCount} sets done</div>
+          <div class="hist-session-meta">${(()=>{
+            let tot=0;
+            s.exercises.forEach(ex=>{
+              ex.sets.forEach(set=>{ tot+=(set.setDuration||0); });
+            });
+            return fmtTime(s.date)+' · '+fmtDuration(s.duration)+' · '+exCount+' exercises · '+setCount+' sets'+(tot>0?' · Active: '+fmtSecs(tot):'');
+          })()}</div>
         </div>
         <div class="hist-session-right">
           <button class="hist-del-btn" onclick="event.stopPropagation();delSession('${s.id}')">✕</button>
