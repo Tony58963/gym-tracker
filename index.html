@@ -474,7 +474,10 @@ function removeSet(wid){const ex=workout.find(e=>e.wid===wid);if(ex.sets.length>
 function toggleSetDone(wid,si){
   const ex=workout.find(e=>e.wid===wid);
   ex.sets[si].done=!ex.sets[si].done;
+  const wasCompleted = ex.completed;
   ex.completed=ex.sets.every(s=>s.done);
+  // Auto-collapse when exercise becomes complete
+  if(ex.completed && !wasCompleted) ex.active=false;
   if(ex.sets[si].done){
     if(isCardio(ex)){
       // Stop cardio timer, save duration
@@ -485,7 +488,8 @@ function toggleSetDone(wid,si){
       if(cardioTimers[wid])delete cardioTimers[wid];
     } else {
       stopSetTimer(wid,si);
-      ex.sets[si].setDuration=setTimers[setTimerKey(wid,si)]?.secs||0;
+      // Always record duration — 0 if timer wasn't started
+      ex.sets[si].setDuration = (setTimers[setTimerKey(wid,si)]?.secs) || 0;
       startRest(wid);
     }
   }
@@ -624,9 +628,10 @@ function nextSet(wid){
   // Find first undone set
   const nextIdx=ex.sets.findIndex(s=>!s.done);
   if(nextIdx===-1){
-    // All sets done — mark exercise complete, cancel rest
+    // All sets done — mark exercise complete, cancel rest, collapse it
     if(restTimers[wid]){clearInterval(restTimers[wid].iv);delete restTimers[wid];}
     ex.completed=true;
+    ex.active=false;  // collapse
     // Auto-expand next exercise
     const exIdx=workout.indexOf(ex);
     if(exIdx<workout.length-1){
@@ -830,11 +835,21 @@ function closeConfirm(){document.getElementById('confirm-modal').classList.remov
 
 function archiveSession(clearAfter=true){
   if(!workout.length)return;
+  // Snapshot: make sure every set has setDuration recorded before saving
+  workout.forEach(ex=>{
+    if(!isCardio(ex)){
+      ex.sets.forEach((s,si)=>{
+        if(s.setDuration===undefined||s.setDuration===null){
+          s.setDuration = setTimers[setTimerKey(ex.wid,si)]?.secs || 0;
+        }
+      });
+    }
+  });
   const record={
     id:'s'+Date.now(),
     date:sessionStart||Date.now(),
     duration:sessionElapsed,
-    exercises:JSON.parse(JSON.stringify(workout))
+    exercises:JSON.parse(JSON.stringify(workout))  // snapshot BEFORE reset
   };
   history.unshift(record);
   if(history.length>120)history=history.slice(0,120);
@@ -842,7 +857,7 @@ function archiveSession(clearAfter=true){
     // Reset session state but KEEP exercises — just clear done/timer state
     workout.forEach(ex=>{
       ex.completed=false;
-      ex.sets.forEach(s=>{s.done=false;s.setDuration=0;s.setStarted=false;});
+      ex.sets.forEach(s=>{s.done=false;s.setDuration=undefined;s.setStarted=false;});
     });
     sessionStart=null;
     sessionActive=false;
@@ -887,8 +902,8 @@ function renderHistory(){
           const cdur=set.setDuration?fmtSecs(set.setDuration):(set.mins?set.mins+'min':'—');
           cols=`<span>Lvl ${set.level||'—'}</span><span>${set.speed||'—'} km/h</span><span>${cdur}</span>`;
         }else{
-          const dur=set.setDuration?fmtSecs(set.setDuration):'';
-        cols=`<span>${set.weight||'—'}kg</span><span>${set.reps||'—'} reps</span><span>${dur}</span>`;
+          const dur=(set.setDuration&&set.setDuration>0)?fmtSecs(set.setDuration):'';
+          cols=`<span>${set.weight||'—'}kg</span><span>${set.reps||'—'} reps</span><span>${dur}</span>`;
         }
         return `<div class="hist-set-row"><span>${i+1}</span>${cols}<span class="${set.done?'hist-set-done':''}">${set.done?'✓':''}</span></div>`;
       }).join('');
